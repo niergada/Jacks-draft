@@ -33,6 +33,7 @@ body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg
 .landing-btn.primary{background:var(--accent);color:white;border:none}
 
 /* SETUP — name selector chips */
+label.field-label{font-size:12px;color:var(--muted);display:block;margin-bottom:2px;margin-top:10px}
 .name-selector{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 18px}
 .name-chip{padding:10px 22px;border-radius:999px;border:2px solid var(--border);background:white;cursor:pointer;font-size:15px;font-weight:600;color:#555;transition:all .18s;user-select:none}
 .name-chip:hover{border-color:#aaa;color:#111;transform:translateY(-1px)}
@@ -163,7 +164,7 @@ textarea{resize:vertical}
 <div class="header">
   <h1 id="pageTitle">Jack's Paintings</h1>
   <p id="pageDedication">A family draft to share a collection</p>
-  <div id="syncBar" style="display:none;margin-top:10px;font-size:12px;padding:5px 14px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;background:var(--color-bg,#f3f4f6)">
+  <div id="syncBar" style="margin-top:10px;font-size:12px;padding:5px 14px;border-radius:999px;display:none;align-items:center;gap:6px;background:#f3f4f6">
     <span id="syncDot" style="width:8px;height:8px;border-radius:50%;background:#aaa;flex-shrink:0"></span>
     <span id="syncMsg">Connecting...</span>
   </div>
@@ -403,20 +404,6 @@ function showScreen(id){
     document.getElementById(s).classList.add('hidden')
   })
   document.getElementById(id).classList.remove('hidden')
-}
-
-function showJoin(){
-  if(!state.participants.length){
-    alert('The commissioner has not launched the draft yet.')
-    return
-  }
-  if(!cardState.shuffled.length){
-    alert('The commissioner has not opened the card draw yet. Please wait.')
-    return
-  }
-  cardState.whoAmI=null
-  initCardScreen()
-  showScreen('cardScreen')
 }
 
 function renderJoinScreen(){
@@ -943,7 +930,9 @@ function confirmPick(){
 
 function snapshot(){
   return JSON.stringify({
-    paintings:    state.paintings.map(x=>({...x})),
+    // Strip img from paintings in snapshots — images are always in local state
+    // and restoreSnapshot merges back without touching img field
+    paintings:    state.paintings.map(x=>({id:x.id, title:x.title, desc:x.desc, taken:x.taken})),
     turn:         state.turn,
     order:        [...state.order],
     pickLog:      [...state.pickLog],
@@ -953,7 +942,14 @@ function snapshot(){
 
 function restoreSnapshot(json){
   const s=JSON.parse(json)
-  state.paintings=s.paintings
+  // Merge snapshot data back onto existing paintings, preserving local img
+  if(s.paintings&&s.paintings.length){
+    state.paintings=state.paintings.map(local=>{
+      const snap=s.paintings.find(p=>p.id===local.id)
+      if(!snap) return local
+      return {...local, title:snap.title, desc:snap.desc, taken:snap.taken}
+    })
+  }
   state.turn=s.turn
   state.order=s.order
   state.pickLog=s.pickLog||[]
@@ -1290,24 +1286,13 @@ const IS_LOCAL = location.protocol === 'file:'
 let pollTimer=null
 let lastRemoteHash=''
 let isSaving=false
-let localPaintingImgs={}  // id → base64, always kept locally
-
-function stripImgs(paintings){
-  return paintings.map(p=>({...p, img:'__local__'}))
-}
-
-function restoreImgs(paintings){
-  return paintings.map(p=>({
-    ...p,
-    img: p.img==='__local__' ? (localPaintingImgs[p.id]||null) : p.img
-  }))
-}
 
 function buildRemotePayload(){
   return {
     state:{
       participants:[...state.participants],
-      paintings: stripImgs(state.paintings),
+      // Strip images — they live locally in the HTML, never go to JSONBin
+      paintings: state.paintings.map(p=>({id:p.id, title:p.title, desc:p.desc, taken:p.taken})),
       order:[...state.order],
       turn:state.turn,
       history:[],
@@ -1388,13 +1373,32 @@ async function loadFromCloud(){
 
 function applyRemotePayload(payload){
   const s=payload.state
-  // Restore paintings with local images merged back in
+
+  // Always preserve local paintings (they carry the embedded photos).
+  // Remote paintings only carry title, desc, taken, and id — never full images.
+  // Strategy:
+  //   - If remote has no paintings (empty bin), keep local paintings untouched.
+  //   - If remote has paintings, merge the taken/title/desc fields onto local
+  //     paintings by id so pick state is synced without losing images.
+  if(s.paintings && s.paintings.length){
+    state.paintings=state.paintings.map(local=>{
+      const remote=s.paintings.find(r=>r.id===local.id)
+      if(!remote) return local
+      return {
+        ...local,                    // keep local img and id
+        title:  remote.title  || local.title,
+        desc:   remote.desc   || local.desc,
+        taken:  remote.taken  ?? local.taken
+      }
+    })
+  }
+  // If remote paintings is empty, local paintings stay exactly as-is
+
   state.participants=s.participants||[]
-  state.paintings=restoreImgs(s.paintings||[])
   state.order=s.order||[]
   state.turn=s.turn||0
   state.pickLog=s.pickLog||[]
-  state.history=[]  // never sync history — too large
+  state.history=[]
   Object.assign(cardState,payload.cardState||{})
   pendingOrder=[...(payload.pendingOrder||state.order)]
   isSetupMode=payload.isSetupMode||false
@@ -1425,7 +1429,7 @@ async function pollForUpdates(){
     }
     lastRemoteHash=remoteHash
     applyRemotePayload(payload)
-    setSyncStatus('live','Updated')
+    setSyncStatus('updated')
     const draftVisible=!document.getElementById('draft').classList.contains('hidden')
     if(draftVisible) render()
     const cardVisible=!document.getElementById('cardScreen').classList.contains('hidden')
@@ -1445,7 +1449,7 @@ function stopPolling(){
 }
 
 /* Status indicator */
-function setSyncStatus(state, msg){
+function setSyncStatus(status, msg){
   const dot=document.getElementById('syncDot')
   const txt=document.getElementById('syncMsg')
   const bar=document.getElementById('syncBar')
@@ -1455,15 +1459,15 @@ function setSyncStatus(state, msg){
     saved:  ['#2d6a4f','Saved'],
     loading:['#f59e0b','Loading...'],
     live:   ['#2d6a4f','Live'],
+    updated:['#2d6a4f','Updated'],
     ready:  ['#6b7280', msg||'Ready'],
     error:  ['#c0392b', msg||'Connection error']
   }
-  const [color,label]=states[state]||['#aaa',msg||state]
+  const [color,label]=states[status]||['#aaa',msg||status]
   dot.style.background=color
   txt.textContent=label
-  // Auto-clear "Saved" after 2s
-  if(state==='saved') setTimeout(()=>setSyncStatus('live'),2000)
-  if(state==='Updated') setTimeout(()=>setSyncStatus('live'),1500)
+  if(status==='saved') setTimeout(()=>setSyncStatus('live'),2000)
+  if(status==='updated') setTimeout(()=>setSyncStatus('live'),1500)
 }
 
 /* Wrap all state-mutating actions to auto-save */
@@ -1526,9 +1530,6 @@ saveEdit=async function(){
 
 /* ── BOOT ── */
 ;(async function boot(){
-  // Cache all local painting images by id before any remote load
-  state.paintings.forEach(p=>{ if(p.img) localPaintingImgs[p.id]=p.img })
-
   // Show local-file warning if not served over HTTP
   if(IS_LOCAL){
     document.getElementById('localFileBanner').style.display='block'
